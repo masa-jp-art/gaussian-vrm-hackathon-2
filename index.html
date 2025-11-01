@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>GVRM × three.js マルチアバター舞台</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { height: 100%; margin: 0; background:#111; color:#ddd; font-family: system-ui, sans-serif; }
+    #hud { position: fixed; left: 12px; top: 12px; line-height:1.4; background: rgba(0,0,0,.5); padding: 10px 12px; border-radius: 8px; font-size: 12px; -webkit-font-smoothing: antialiased; }
+    #hud b { color:#fff; }
+    #hud .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    canvas { display:block; width:100%; height:100%; }
+  </style>
+
+  <!-- 依存ライブラリの import map
+       ※ gvrm は作者公開の gs-edit 配布物にマップ（動作実績のある構成）
+       ※ three / addons のバージョンは three-vrm 2.x と相性の良い 0.170.0 を指定 -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+      "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2.1.0/lib/three-vrm.module.js",
+      "gaussian-splats-3d": "https://naruya.github.io/gs-edit/lib/gaussian-splats-3d.module.js",
+      "jszip": "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm",
+      "gvrm": "https://naruya.github.io/gs-edit/lib/gaussian-vrm.min.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <div><b>操作</b></div>
+    <div class="mono">1..5 : アニメ切替　M : BGM再生/停止　G : グリッド表示</div>
+    <div class="mono">全アバターに同じ操作が適用されます</div>
+    <hr style="border:none;border-top:1px solid #333;margin:6px 0">
+    <div class="mono" id="status">準備中…</div>
+  </div>
+
+  <canvas id="stage"></canvas>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GVRM } from 'gvrm';
+
+    // ======= 設定（ここを編集） =======
+    // 並べる GVRM アバター（assets/ 内のファイル名に合わせて編集）
+    // 位置は読み込み後に床面へ揃え、AVATAR_X_POSITIONS で指定した横一列に配置されます
+    const AVATAR_CONFIGS = [
+      { file: '../assets/20251101-Masa.gvrm', defaultFBX: '../assets/Dancing.fbx' },
+      { file: '../assets/sample1.gvrm', defaultFBX: '../assets/Dancing.fbx' },
+      { file: '../assets/sample4.gvrm', defaultFBX: '../assets/Dancing.fbx' },
+      { file: '../assets/sample5.gvrm', defaultFBX: '../assets/Dancing.fbx' }
+    ];
+    const AVATAR_X_POSITIONS = [-5.4, -1.8, 1.8, 5.4];  // 左から順に配置する座標（体数に合わせて調整）
+    const CAMERA_MARGIN = 0.8;       // カメラに収める際の左右マージン
+
+    // キーで選べるアニメーション（assets/ 内の FBX ファイルに合わせて編集）
+    const KEY_TO_FBX = {
+      Digit1: { name: '1',   file: '../assets/Dancing.fbx' },
+      Digit2: { name: '2',   file: '../assets/Northern Soul Spin Combo.fbx' },
+      Digit3: { name: '3',    file: '../assets/Sitting Laughing.fbx' },
+      Digit4: { name: '4',  file: '../assets/Swing Dancing-1.fbx' },
+      Digit5: { name: '5',   file: '../assets/Swing Dancing-2.fbx' }
+    };
+
+    // BGM 候補（存在する方が読み込まれる）
+    const MUSIC_CANDIDATES = ['../assets/Tokyo Urban Haka No Ura.mp3', '../assets/Gaussian‑VRM/assets/KMGY .mp3'];
+
+    // ======= three.js 基本セットアップ =======
+    const canvas = document.getElementById('stage');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, alpha:false });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0d0d0d);
+
+    const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.01, 100);
+    camera.position.set(0, 1.6, 6.0);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.set(0, 1.2, 0);
+
+    // 環境光 & 方向光
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x222233, 0.8);
+    hemi.position.set(0, 10, 0);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 1.1);
+    dir.position.set(4, 8, 5);
+    scene.add(dir);
+
+    // 床＆グリッド
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(40, 40),
+      new THREE.MeshStandardMaterial({
+        color:0x111116,
+        emissive:0x0b0b24,
+        roughness:0.8,
+        metalness:0.05
+      })
+    );
+    ground.rotation.x = -Math.PI/2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    const grid = new THREE.GridHelper(40, 40, 0x333333, 0x222222);
+    grid.visible = true;
+    scene.add(grid);
+
+    const overheadSpots = [
+      { color: 0x8844ff, position: [-5, 8, 4], target: [0, 1.5, 0] },
+      { color: 0xff3366, position: [5, 8, 4], target: [0, 1.5, 0] },
+      { color: 0x33ffee, position: [0, 7, -4], target: [0, 1.5, 0] }
+    ];
+    for (const cfg of overheadSpots) {
+      const light = new THREE.SpotLight(cfg.color, 0.9, 25, Math.PI / 5, 0.45, 1.2);
+      light.position.set(...cfg.position);
+      light.target.position.set(...cfg.target);
+      scene.add(light);
+      scene.add(light.target);
+    }
+
+    const pulsingLights = [];
+    const floorPositions = [-6, 0, 6];
+    const floorColors = [0xff4f5a, 0x47b2ff, 0xffd04a];
+    floorPositions.forEach((x, i) => {
+      const light = new THREE.PointLight(floorColors[i], 1.4, 15, 2.2);
+      light.position.set(x, 0.6, 2.5 * (i - 1));
+      scene.add(light);
+      pulsingLights.push({
+        light,
+        base: 0.9,
+        amp: 0.7,
+        speed: 0.7 + i * 0.35,
+        phase: i * Math.PI * 0.5
+      });
+    });
+
+    // ======= オーディオ =======
+    const listener = new THREE.AudioListener();
+    camera.add(listener);
+    const bgm = new THREE.Audio(listener);
+    const audioLoader = new THREE.AudioLoader();
+
+    async function loadFirstAvailableSound(urls) {
+      for (const url of urls) {
+        try {
+          const buffer = await new Promise((resolve, reject) => {
+            audioLoader.load(url, resolve, undefined, reject);
+          });
+          return buffer;
+        } catch (_) {/* 次候補へ */}
+      }
+      return null;
+    }
+
+    const bgmBuffer = await loadFirstAvailableSound(MUSIC_CANDIDATES);
+    if (bgmBuffer) {
+      bgm.setBuffer(bgmBuffer);
+      bgm.setLoop(true);
+      bgm.setVolume(0.45);
+    }
+
+    // ======= GVRM を読み込んで並べる =======
+    const gvrms = [];           // GVRM インスタンス
+    const anchors = [];         // アバターごとのアンカー Group
+
+    // scene.children 差分から、GVRM が追加した Object3D をアンカーへ付け替える
+    function reparentNewObjectsTo(anchor, beforeChildren) {
+      const before = new Set(beforeChildren);
+      const added = scene.children.filter(obj => !before.has(obj));
+      for (const obj of added) {
+        scene.remove(obj);
+        anchor.add(obj);
+      }
+    }
+
+    function liftAnchorToGround(anchor) {
+      anchor.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(anchor);
+      if (box.isEmpty()) return;
+      const offset = box.min.y;
+      if (Math.abs(offset) < 1e-4) return;
+      for (const child of anchor.children) {
+        child.position.y -= offset;
+      }
+      anchor.position.y = 0;
+      anchor.updateMatrixWorld(true);
+    }
+
+    function levelAnchors() {
+      anchors.forEach(anchor => {
+        if (!anchor) return;
+        liftAnchorToGround(anchor);
+      });
+    }
+
+    function frameCameraFromAnchors() {
+      const availableAnchors = anchors.filter(Boolean);
+      if (!availableAnchors.length) return;
+      let minX = Infinity;
+      let maxX = -Infinity;
+      availableAnchors.forEach(anchor => {
+        anchor.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(anchor);
+        if (box.isEmpty()) return;
+        minX = Math.min(minX, box.min.x);
+        maxX = Math.max(maxX, box.max.x);
+      });
+      if (!isFinite(minX) || !isFinite(maxX)) return;
+      minX -= CAMERA_MARGIN;
+      maxX += CAMERA_MARGIN;
+      const centerX = (minX + maxX) / 2;
+      const span = maxX - minX;
+      const halfWidth = span / 2;
+      const verticalOffset = 1.6;
+      const distance = halfWidth / Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+      camera.position.set(centerX, verticalOffset, Math.max(6, distance + 2.0));
+      controls.target.set(centerX, 1.2, 0);
+    }
+
+    // 並列ロード
+    const anchorPositions = AVATAR_CONFIGS.map((_, i) => AVATAR_X_POSITIONS[i] ?? 3.6 * (i - (AVATAR_CONFIGS.length - 1) / 2));
+
+    await Promise.all(AVATAR_CONFIGS.map(async (cfg, i) => {
+      const anchor = new THREE.Group();
+      scene.add(anchor);
+      anchors[i] = anchor;
+
+      const before = scene.children.slice();
+      const gvrm = await GVRM.load(cfg.file, scene, camera, renderer);   // GVRM 読み込み（シーンに追加される）
+      reparentNewObjectsTo(anchor, before);                               // 追加分をアンカー配下へ
+      if (cfg.defaultFBX) await gvrm.changeFBX(cfg.defaultFBX);          // 既定アニメ
+      gvrms[i] = gvrm;
+      anchor.position.set(anchorPositions[i] ?? 0, 0, 0);
+      liftAnchorToGround(anchor);
+    }));
+    frameCameraFromAnchors();
+
+    // ======= 入力処理 =======
+    // HUD 更新
+    const status = document.getElementById('status');
+    function refreshHUD(msg) {
+      status.textContent = msg || '準備完了';
+    }
+    refreshHUD('準備完了');
+
+    // キー押下でアニメ切替／選択移動／BGM
+    window.addEventListener('keydown', async (e) => {
+      if (e.repeat) return;
+
+      // グリッド表示切替
+      if (e.code === 'KeyG') { grid.visible = !grid.visible; return; }
+
+      // BGM 再生/停止（初回はユーザー操作で AudioContext を resume）
+      if (e.code === 'KeyM' && bgmBuffer) {
+        try { await listener.context.resume(); } catch (_) {}
+        if (bgm.isPlaying) bgm.stop(); else bgm.play();
+        refreshHUD(bgm.isPlaying ? 'BGM: 再生' : 'BGM: 停止');
+        return;
+      }
+
+      // アニメ切替（数字キー）
+      const slot = KEY_TO_FBX[e.code];
+      if (slot) {
+        for (const g of gvrms) await g.changeFBX(slot.file);  // GVRM が FBX を適用
+        levelAnchors();
+        refreshHUD(`アニメ: ${slot.name}`);
+      }
+    });
+
+    // ======= ループ =======
+    renderer.setAnimationLoop(() => {
+      const time = performance.now() * 0.001;
+      for (const info of pulsingLights) {
+        info.light.intensity = info.base + Math.sin(time * info.speed + info.phase) * info.amp;
+      }
+      for (const g of gvrms) g.update();  // GVRM は毎フレーム update
+      controls.update();
+      renderer.render(scene, camera);
+    });
+
+    // ======= リサイズ対応 =======
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>
